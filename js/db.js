@@ -111,6 +111,9 @@ const DEFAULT_SETTINGS = {
   theme: 'amber',
   defaultHourlyWage: 1200,
   savingsRate: 30,
+  payday: 10,
+  paydayAdjust: 'before', // 'before'=前倒し / 'after'=後倒し / 'none'=そのまま
+  shiftPatterns: [],
 };
 
 let cachedFrames = null;
@@ -134,6 +137,9 @@ async function getSettings() {
     theme: map.theme ?? DEFAULT_SETTINGS.theme,
     defaultHourlyWage: map.defaultHourlyWage ?? DEFAULT_SETTINGS.defaultHourlyWage,
     savingsRate: map.savingsRate ?? DEFAULT_SETTINGS.savingsRate,
+    payday: map.payday ?? DEFAULT_SETTINGS.payday,
+    paydayAdjust: map.paydayAdjust ?? DEFAULT_SETTINGS.paydayAdjust,
+    shiftPatterns: Array.isArray(map.shiftPatterns) ? map.shiftPatterns : [],
   };
 }
 
@@ -157,6 +163,9 @@ async function ensureDefaultsSeeded() {
   if (!keys.has('theme')) await saveSetting('theme', DEFAULT_SETTINGS.theme);
   if (!keys.has('defaultHourlyWage')) await saveSetting('defaultHourlyWage', DEFAULT_SETTINGS.defaultHourlyWage);
   if (!keys.has('savingsRate')) await saveSetting('savingsRate', DEFAULT_SETTINGS.savingsRate);
+  if (!keys.has('payday')) await saveSetting('payday', DEFAULT_SETTINGS.payday);
+  if (!keys.has('paydayAdjust')) await saveSetting('paydayAdjust', DEFAULT_SETTINGS.paydayAdjust);
+  if (!keys.has('shiftPatterns')) await saveSetting('shiftPatterns', []);
 }
 
 // ---- 貯金枠 ----

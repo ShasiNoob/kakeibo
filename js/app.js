@@ -12,9 +12,14 @@ const state = {
 const THEMES = [
   { id: 'amber', name: 'アンバー', color: '#D4A15C', chart: '#D4A15C' },
   { id: 'sakura', name: 'さくら', color: '#E58AA5', chart: '#E58AA5' },
+  { id: 'sunset', name: 'サンセット', color: '#F09A5C', chart: '#F09A5C' },
+  { id: 'ruby', name: 'ルビー', color: '#E07A72', chart: '#E07A72' },
   { id: 'ocean', name: 'オーシャン', color: '#7FA8DC', chart: '#7FA8DC' },
+  { id: 'aqua', name: 'アクア', color: '#63C3D6', chart: '#63C3D6' },
   { id: 'forest', name: 'フォレスト', color: '#6FBFA0', chart: '#6FBFA0' },
   { id: 'grape', name: 'グレープ', color: '#B79FD4', chart: '#B79FD4' },
+  { id: 'indigo', name: 'インディゴ', color: '#8B8FE0', chart: '#8B8FE0' },
+  { id: 'mono', name: 'モノ', color: '#A8AEB8', chart: '#A8AEB8' },
 ];
 
 const yen = (n) => '¥' + Math.round(n).toLocaleString('ja-JP');
@@ -37,6 +42,32 @@ const hoursLabel = (minutes) => {
   const m = minutes % 60;
   return m ? `${h}時間${m}分` : `${h}時間`;
 };
+
+// 給料日(設定の日付)を週末調整した実際の支給日を返す
+function actualPayday(year, month, settings) {
+  const day = Number(settings.payday) || 10;
+  const lastDay = new Date(year, month, 0).getDate();
+  const d = new Date(year, month - 1, Math.min(day, lastDay));
+  const adjust = settings.paydayAdjust || 'before';
+  if (adjust !== 'none') {
+    const step = adjust === 'before' ? -1 : 1;
+    while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + step);
+  }
+  return d;
+}
+
+// 勤務月('YYYY-MM')の給与が支給される日(翌月の給料日)
+function paydayForWorkMonth(workMonthStr, settings) {
+  const next = shiftMonthOf(workMonthStr, 1);
+  const [y, m] = next.split('-').map((x) => parseInt(x, 10));
+  return actualPayday(y, m, settings);
+}
+
+const dateLabelWithDow = (d) => `${d.getMonth() + 1}月${d.getDate()}日（${'日月火水木金土'[d.getDay()]}）`;
+
+function patternLabel(p) {
+  return p.name || `${p.start}–${p.end} ・ 時給${yen(p.wage)}${p.breakMin ? ` ・ 休憩${p.breakMin}分` : ''}`;
+}
 
 const root = document.getElementById('app');
 
@@ -426,6 +457,10 @@ async function renderShifts() {
   const month = state.shiftMonth || thisMonth();
   const { shifts, totalMinutes, totalPay, count } = await DB.getMonthShiftSummary(month);
   const savingsEstimate = Math.floor((totalPay * (settings.savingsRate || 0)) / 100);
+  const payDate = paydayForWorkMonth(month, settings);
+  const prevSummary = await DB.getMonthShiftSummary(shiftMonthOf(month, -1));
+  const [curY, curM] = month.split('-').map((x) => parseInt(x, 10));
+  const receivedDate = actualPayday(curY, curM, settings);
 
   const [y, mo] = month.split('-').map((x) => parseInt(x, 10));
   const firstDay = new Date(y, mo - 1, 1);
@@ -473,7 +508,14 @@ async function renderShifts() {
           <div class="stat-value stat-value-sm">${yen(savingsEstimate)}</div>
         </div>
       </div>
-      <div class="hint">貯金見込みは「給与見込み × 貯金率」で計算しています。貯金率と時給の初期値は設定タブで変更できます。日付をタップするとシフトを追加・削除できます。</div>
+      <div class="hint">貯金見込みは「給与見込み × 貯金率」で計算しています。貯金率・時給の初期値・給料日は設定タブで変更できます。日付をタップするとシフトを追加・削除できます。</div>
+    </section>
+
+    <section class="section">
+      <div class="form-card">
+        <div class="hint" style="color:var(--text);font-size:13px;">この月の勤務分 <strong>${yen(totalPay)}</strong> は <strong>${dateLabelWithDow(payDate)}</strong> に支給される予定です。</div>
+        <div class="hint">${monthLabel(month)}の給料日（${dateLabelWithDow(receivedDate)}）に支給される先月勤務分は <strong>${yen(prevSummary.totalPay)}</strong> です。</div>
+      </div>
     </section>
 
     <section class="section">
@@ -594,6 +636,48 @@ async function renderSettings() {
     </section>
 
     <section class="section">
+      <div class="section-head"><h2>給料日</h2></div>
+      <div class="form-card">
+        <div class="hint">勤務した月の給与は、翌月の給料日に支給されるものとして計算します。給料日が土日の月は、調整方法にしたがって実際の支給日を表示します（祝日は未対応）。</div>
+        <label class="field">
+          <span>給料日</span>
+          <select id="set-payday">
+            ${Array.from({ length: 31 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${settings.payday === d ? 'selected' : ''}>${d}日${d === 31 ? '（月末）' : ''}</option>`).join('')}
+          </select>
+        </label>
+        <label class="field">
+          <span>土日のとき</span>
+          <select id="set-payday-adjust">
+            <option value="before" ${settings.paydayAdjust === 'before' ? 'selected' : ''}>前倒し（直前の平日）</option>
+            <option value="after" ${settings.paydayAdjust === 'after' ? 'selected' : ''}>後倒し（直後の平日）</option>
+            <option value="none" ${settings.paydayAdjust === 'none' ? 'selected' : ''}>そのまま</option>
+          </select>
+        </label>
+        <button class="btn btn-primary btn-block" id="save-payday">保存する</button>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2>シフトのパターン</h2></div>
+      <div class="form-card">
+        <div class="hint">よくある勤務パターンを登録しておくと、シフト画面で日付を開いてワンタップで入力できます。</div>
+        ${settings.shiftPatterns.length ? `<div class="pattern-list">
+          ${settings.shiftPatterns.map((p) => `<div class="pattern-item"><span>${escapeHtml(patternLabel(p))}</span><button class="btn btn-danger btn-sm" data-del-pattern="${p.id}">削除</button></div>`).join('')}
+        </div>` : ''}
+        <label class="field"><span>名前（任意）</span><input type="text" id="pat-name" placeholder="例：遅番"></label>
+        <div class="field-row">
+          <label class="field"><span>開始</span><input type="time" id="pat-start" value="17:00"></label>
+          <label class="field"><span>終了</span><input type="time" id="pat-end" value="22:00"></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>休憩（分）</span><input type="number" id="pat-break" value="0" inputmode="numeric" min="0"></label>
+          <label class="field"><span>時給</span><input type="number" id="pat-wage" value="${settings.defaultHourlyWage}" inputmode="numeric"></label>
+        </div>
+        <button class="btn btn-outline btn-block" id="add-pattern">パターンを追加</button>
+      </div>
+    </section>
+
+    <section class="section">
       <div class="section-head"><h2>支出カテゴリ</h2></div>
       <div class="form-card">
         <div class="chip-list">
@@ -654,7 +738,11 @@ async function renderModal() {
 async function renderIncomeForm() {
   const settings = await DB.getSettings();
   const now = new Date();
-  const shiftSummary = await DB.getMonthShiftSummary(thisMonth());
+  // 給与は「先月勤務分が今月の給料日に支給される」前提で、先月分を提案する
+  const curMonthStr = thisMonth();
+  const prevMonthStr = shiftMonthOf(curMonthStr, -1);
+  const shiftSummary = await DB.getMonthShiftSummary(prevMonthStr);
+  const payDate = actualPayday(now.getFullYear(), now.getMonth() + 1, settings);
   const frameFields = settings.frames.map((fr) => `
     <label class="field"><span>${escapeHtml(fr.name)}</span><input type="number" class="frame-amt" name="frame_${fr.id}" value="${fr.defaultAmount}" inputmode="numeric"></label>`).join('');
   return `
@@ -669,7 +757,7 @@ async function renderIncomeForm() {
       </div>
       ${shiftSummary.totalPay > 0 ? `
       <div class="suggest-box">
-        <div class="suggest-text">今月のシフト給与見込みは <strong>${yen(shiftSummary.totalPay)}</strong> です。そのまま入力しますか？</div>
+        <div class="suggest-text">${monthLabel(prevMonthStr)}勤務分の給与見込みは <strong>${yen(shiftSummary.totalPay)}</strong> です（${dateLabelWithDow(payDate)}支給分）。そのまま入力しますか？</div>
         <button type="button" class="btn btn-outline btn-sm" id="use-shift-pay" data-amount="${shiftSummary.totalPay}">この金額で入力する</button>
       </div>` : ''}
       <label class="field"><span>金額</span><input type="number" name="amount" inputmode="numeric" placeholder="49500" required></label>
@@ -785,6 +873,11 @@ async function renderShiftDayModal(dateStr) {
       <h2>${m}月${d}日のシフト</h2>
       <button class="icon-btn" data-close-modal="1">✕</button>
     </div>
+    ${settings.shiftPatterns.length ? `
+    <div class="section-head"><h3>パターンから入力</h3></div>
+    <div class="pattern-row">
+      ${settings.shiftPatterns.map((p) => `<button class="btn btn-outline btn-sm" data-apply-pattern="${p.id}">${escapeHtml(patternLabel(p))}</button>`).join('')}
+    </div>` : ''}
     ${shifts.length ? `<div class="tx-list" style="margin-bottom:14px;">
       ${shifts.map((s) => `<div class="tx-row">
         <div class="tx-main">
@@ -964,6 +1057,18 @@ function attachHandlers() {
   });
   root.querySelectorAll('[data-shift-day]').forEach((el) => {
     el.addEventListener('click', () => openModal('shiftDay', el.dataset.shiftDay));
+  });
+  root.querySelectorAll('[data-apply-pattern]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const dateStr = state.modal?.payload;
+      if (!dateStr) return;
+      const settings = await DB.getSettings();
+      const p = settings.shiftPatterns.find((x) => x.id === el.dataset.applyPattern);
+      if (!p) return;
+      await DB.addShift({ date: dateStr, start: p.start, end: p.end, breakMin: p.breakMin, wage: p.wage });
+      showToast('パターンでシフトを追加しました');
+      openModal('shiftDay', dateStr);
+    });
   });
   root.querySelectorAll('[data-delete-shift]').forEach((el) => {
     el.addEventListener('click', async (ev) => {
@@ -1233,6 +1338,45 @@ function attachHandlers() {
       showToast('シフトの初期値を保存しました');
     });
   }
+
+  // ---- 設定: 給料日 ----
+  const savePaydayBtn = document.getElementById('save-payday');
+  if (savePaydayBtn) {
+    savePaydayBtn.addEventListener('click', async () => {
+      await DB.saveSetting('payday', Number(document.getElementById('set-payday').value || 10));
+      await DB.saveSetting('paydayAdjust', document.getElementById('set-payday-adjust').value);
+      showToast('給料日の設定を保存しました');
+    });
+  }
+
+  // ---- 設定: シフトパターン ----
+  const addPatternBtn = document.getElementById('add-pattern');
+  if (addPatternBtn) {
+    addPatternBtn.addEventListener('click', async () => {
+      const settings = await DB.getSettings();
+      const pattern = {
+        id: 'pat_' + DB.uid(),
+        name: document.getElementById('pat-name').value.trim(),
+        start: document.getElementById('pat-start').value || '17:00',
+        end: document.getElementById('pat-end').value || '22:00',
+        breakMin: Number(document.getElementById('pat-break').value || 0),
+        wage: Number(document.getElementById('pat-wage').value || 0),
+      };
+      settings.shiftPatterns.push(pattern);
+      await DB.saveSetting('shiftPatterns', settings.shiftPatterns);
+      showToast('パターンを追加しました');
+      render();
+    });
+  }
+  root.querySelectorAll('[data-del-pattern]').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const settings = await DB.getSettings();
+      settings.shiftPatterns = settings.shiftPatterns.filter((p) => p.id !== el.dataset.delPattern);
+      await DB.saveSetting('shiftPatterns', settings.shiftPatterns);
+      showToast('パターンを削除しました');
+      render();
+    });
+  });
 
   // ---- 設定: カテゴリ ----
   const addCategoryBtn = document.getElementById('add-category');
