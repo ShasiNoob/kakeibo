@@ -4,7 +4,7 @@
 // 内部実装を置き換えることで対応できる。
 
 const DB_NAME = 'kakeiboDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -30,6 +30,13 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains('settings')) {
         db.createObjectStore('settings', { keyPath: 'key' });
+      }
+      // v2: シフト管理と目標
+      if (!db.objectStoreNames.contains('shifts')) {
+        db.createObjectStore('shifts', { keyPath: 'id' }).createIndex('date', 'date');
+      }
+      if (!db.objectStoreNames.contains('goals')) {
+        db.createObjectStore('goals', { keyPath: 'id' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -76,7 +83,7 @@ async function remove(storeName, key) {
 }
 
 async function clearAll() {
-  const stores = ['incomes', 'funds', 'expenses', 'categories', 'settings'];
+  const stores = ['incomes', 'funds', 'expenses', 'categories', 'settings', 'shifts', 'goals'];
   const t = await tx(stores, 'readwrite');
   stores.forEach((s) => t.objectStore(s).clear());
   return new Promise((resolve, reject) => {
@@ -91,59 +98,144 @@ function uid() {
 
 // ---- 設定 ----
 
+// 貯金枠: fund の type がそのまま枠IDになる。'free' は自由資金(枠ではない)。
+// 既存データ互換のため、初期枠として 'savings'(普通貯金) と 'car'(車維持費) を持つ。
+const DEFAULT_FRAMES = [
+  { id: 'savings', name: '普通貯金', defaultAmount: 10000 },
+  { id: 'car', name: '車維持費', defaultAmount: 10000 },
+];
+
 const DEFAULT_SETTINGS = {
-  normalSavingsDefault: 10000,
-  carMaintenanceDefault: 10000,
+  frames: DEFAULT_FRAMES,
   categories: ['食費', '交通費', '車', 'DJ・音楽', 'PC・ゲーム', 'ファッション', '趣味', '日用品', '娯楽', 'その他'],
+  theme: 'amber',
+  defaultHourlyWage: 1200,
+  savingsRate: 30,
 };
+
+let cachedFrames = null;
 
 async function getSettings() {
   const rows = await getAll('settings');
   const map = {};
   rows.forEach((r) => (map[r.key] = r.value));
+  let frames = map.frames;
+  if (!Array.isArray(frames) || frames.length === 0) {
+    // v1からの移行: 旧デフォルト積立額を初期枠として引き継ぐ
+    frames = [
+      { id: 'savings', name: '普通貯金', defaultAmount: map.normalSavingsDefault ?? 10000 },
+      { id: 'car', name: '車維持費', defaultAmount: map.carMaintenanceDefault ?? 10000 },
+    ];
+  }
+  cachedFrames = frames;
   return {
-    normalSavingsDefault: map.normalSavingsDefault ?? DEFAULT_SETTINGS.normalSavingsDefault,
-    carMaintenanceDefault: map.carMaintenanceDefault ?? DEFAULT_SETTINGS.carMaintenanceDefault,
+    frames,
     categories: map.categories ?? DEFAULT_SETTINGS.categories.slice(),
+    theme: map.theme ?? DEFAULT_SETTINGS.theme,
+    defaultHourlyWage: map.defaultHourlyWage ?? DEFAULT_SETTINGS.defaultHourlyWage,
+    savingsRate: map.savingsRate ?? DEFAULT_SETTINGS.savingsRate,
   };
 }
 
 async function saveSetting(key, value) {
   await put('settings', { key, value });
+  if (key === 'frames') cachedFrames = value;
 }
 
 async function ensureDefaultsSeeded() {
   const rows = await getAll('settings');
-  if (rows.length === 0) {
-    await saveSetting('normalSavingsDefault', DEFAULT_SETTINGS.normalSavingsDefault);
-    await saveSetting('carMaintenanceDefault', DEFAULT_SETTINGS.carMaintenanceDefault);
-    await saveSetting('categories', DEFAULT_SETTINGS.categories.slice());
+  const keys = new Set(rows.map((r) => r.key));
+  if (!keys.has('frames')) {
+    const legacy = {};
+    rows.forEach((r) => (legacy[r.key] = r.value));
+    await saveSetting('frames', [
+      { id: 'savings', name: '普通貯金', defaultAmount: legacy.normalSavingsDefault ?? 10000 },
+      { id: 'car', name: '車維持費', defaultAmount: legacy.carMaintenanceDefault ?? 10000 },
+    ]);
   }
+  if (!keys.has('categories')) await saveSetting('categories', DEFAULT_SETTINGS.categories.slice());
+  if (!keys.has('theme')) await saveSetting('theme', DEFAULT_SETTINGS.theme);
+  if (!keys.has('defaultHourlyWage')) await saveSetting('defaultHourlyWage', DEFAULT_SETTINGS.defaultHourlyWage);
+  if (!keys.has('savingsRate')) await saveSetting('savingsRate', DEFAULT_SETTINGS.savingsRate);
+}
+
+// ---- 貯金枠 ----
+
+async function addFrame(name, defaultAmount) {
+  const settings = await getSettings();
+  const frame = { id: 'f_' + uid(), name, defaultAmount: Number(defaultAmount) || 0 };
+  settings.frames.push(frame);
+  await saveSetting('frames', settings.frames);
+  return frame;
+}
+
+async function updateFrames(frames) {
+  await saveSetting('frames', frames);
+}
+
+async function deleteFrame(frameId) {
+  const funds = (await getAll('funds')).filter((f) => f.type === frameId);
+  const remaining = funds.reduce((s, f) => s + f.remainingAmount, 0);
+  if (remaining > 0) {
+    throw new Error('残高が残っている枠は削除できません。先に支出で使い切ってください。');
+  }
+  // 残高ゼロの fund レコードは掃除する
+  for (const f of funds) await remove('funds', f.id);
+  const settings = await getSettings();
+  settings.frames = settings.frames.filter((fr) => fr.id !== frameId);
+  await saveSetting('frames', settings.frames);
+}
+
+function frameName(type) {
+  if (type === 'free') return '自由資金';
+  const fr = (cachedFrames || DEFAULT_FRAMES).find((f) => f.id === type);
+  return fr ? fr.name : type;
+}
+
+// income レコードから枠別積立額を取り出す(旧形式にも対応)
+function frameAllocOf(income) {
+  if (income.frameAllocations && typeof income.frameAllocations === 'object') {
+    return income.frameAllocations;
+  }
+  const map = {};
+  if (income.normalSavingsAmount) map.savings = income.normalSavingsAmount;
+  if (income.carMaintenanceAmount) map.car = income.carMaintenanceAmount;
+  return map;
 }
 
 // ---- 収入 ----
 
-async function addIncome({ year, month, amount, normalSavingsAmount, carMaintenanceAmount, memo }) {
+async function addIncome({ year, month, amount, frameAllocations, memo }) {
   const monthStr = `${year}-${String(month).padStart(2, '0')}`;
-  const freeAmount = amount - normalSavingsAmount - carMaintenanceAmount;
+  const allocMap = {};
+  let allocTotal = 0;
+  for (const [fid, raw] of Object.entries(frameAllocations || {})) {
+    const a = Number(raw) || 0;
+    if (a !== 0) {
+      allocMap[fid] = a;
+      allocTotal += a;
+    }
+  }
+  const freeAmount = amount - allocTotal;
   const income = {
     id: uid(),
     date: `${monthStr}-01`,
     month: monthStr,
     amount,
-    normalSavingsAmount,
-    carMaintenanceAmount,
+    frameAllocations: allocMap,
+    // 旧形式との互換用ミラー
+    normalSavingsAmount: allocMap.savings || 0,
+    carMaintenanceAmount: allocMap.car || 0,
     freeAmount,
     memo: memo || '',
   };
   await put('incomes', income);
 
   const funds = [];
-  if (normalSavingsAmount > 0) {
-    funds.push({ id: uid(), type: 'savings', sourceMonth: monthStr, originalAmount: normalSavingsAmount, remainingAmount: normalSavingsAmount, incomeId: income.id });
-  }
-  if (carMaintenanceAmount > 0) {
-    funds.push({ id: uid(), type: 'car', sourceMonth: monthStr, originalAmount: carMaintenanceAmount, remainingAmount: carMaintenanceAmount, incomeId: income.id });
+  for (const [fid, a] of Object.entries(allocMap)) {
+    if (a > 0) {
+      funds.push({ id: uid(), type: fid, sourceMonth: monthStr, originalAmount: a, remainingAmount: a, incomeId: income.id });
+    }
   }
   if (freeAmount !== 0) {
     funds.push({ id: uid(), type: 'free', sourceMonth: monthStr, originalAmount: freeAmount, remainingAmount: freeAmount, incomeId: income.id });
@@ -166,7 +258,7 @@ async function deleteIncome(incomeId) {
 
 // ---- 資金アロケーション (FIFO) ----
 
-// requestedByType: [{type:'free', amount: 50000}, {type:'savings', amount:20000}]
+// requestedByType: [{type:'free', amount: 50000}, {type:'<frameId>', amount:20000}]
 // 戻り値: { allocations: [{fundId, sourceMonth, type, amount}], shortfall: [{type, missing}] }
 async function allocateFunds(requestedByType) {
   const allFunds = await getAll('funds');
@@ -248,9 +340,10 @@ async function deleteExpense(expenseId) {
 
 // ---- 集計ヘルパー ----
 
+// 戻り値: { free: n, <frameId>: n, ... } (fund の type をキーにした残高合計)
 async function getFundTotals() {
   const funds = await getAll('funds');
-  const totals = { free: 0, savings: 0, car: 0 };
+  const totals = { free: 0 };
   funds.forEach((f) => (totals[f.type] = (totals[f.type] || 0) + f.remainingAmount));
   return totals;
 }
@@ -267,10 +360,14 @@ async function getMonthSummary(monthStr) {
   const expenses = (await getAll('expenses')).filter((e) => e.month === monthStr);
   const incomeTotal = incomes.reduce((s, i) => s + i.amount, 0);
   const expenseTotal = expenses.reduce((s, e) => s + e.amount, 0);
-  const savings = incomes.reduce((s, i) => s + i.normalSavingsAmount, 0);
-  const car = incomes.reduce((s, i) => s + i.carMaintenanceAmount, 0);
-  const free = incomes.reduce((s, i) => s + i.freeAmount, 0);
-  return { monthStr, incomes, expenses, incomeTotal, expenseTotal, savings, car, free };
+  const frames = {};
+  let free = 0;
+  incomes.forEach((i) => {
+    const alloc = frameAllocOf(i);
+    for (const [fid, a] of Object.entries(alloc)) frames[fid] = (frames[fid] || 0) + a;
+    free += i.freeAmount || 0;
+  });
+  return { monthStr, incomes, expenses, incomeTotal, expenseTotal, frames, free };
 }
 
 async function getAllMonths() {
@@ -292,13 +389,101 @@ async function getCategoryTotals(year) {
   return totals;
 }
 
+// ---- シフト ----
+
+function timeToMinutes(t) {
+  const [h, m] = String(t || '0:0').split(':').map((x) => parseInt(x, 10) || 0);
+  return h * 60 + m;
+}
+
+function calcShift({ start, end, breakMin }) {
+  let minutes = timeToMinutes(end) - timeToMinutes(start) - (Number(breakMin) || 0);
+  if (minutes <= -720) minutes += 24 * 60; // 日付をまたぐシフト(終了が翌日)
+  if (minutes < 0) minutes = 0;
+  return minutes;
+}
+
+async function addShift({ date, start, end, breakMin, wage }) {
+  const minutes = calcShift({ start, end, breakMin });
+  const pay = Math.round((minutes / 60) * (Number(wage) || 0));
+  const shift = {
+    id: uid(),
+    date,
+    month: date.slice(0, 7),
+    start,
+    end,
+    breakMin: Number(breakMin) || 0,
+    wage: Number(wage) || 0,
+    minutes,
+    pay,
+  };
+  await put('shifts', shift);
+  return shift;
+}
+
+async function deleteShift(shiftId) {
+  await remove('shifts', shiftId);
+}
+
+async function getShiftsByMonth(monthStr) {
+  const shifts = await getAll('shifts');
+  return shifts
+    .filter((s) => (s.month || s.date.slice(0, 7)) === monthStr)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.start < b.start ? -1 : 1));
+}
+
+async function getMonthShiftSummary(monthStr) {
+  const shifts = await getShiftsByMonth(monthStr);
+  const totalMinutes = shifts.reduce((s, x) => s + (x.minutes || 0), 0);
+  const totalPay = shifts.reduce((s, x) => s + (x.pay || 0), 0);
+  return { shifts, totalMinutes, totalPay, count: shifts.length };
+}
+
+// ---- 目標 ----
+
+async function addGoal({ name, targetAmount, deadline }) {
+  const goal = {
+    id: uid(),
+    name,
+    targetAmount: Number(targetAmount) || 0,
+    savedAmount: 0,
+    deadline: deadline || '',
+    createdAt: new Date().toISOString().slice(0, 10),
+  };
+  await put('goals', goal);
+  return goal;
+}
+
+async function getGoals() {
+  const goals = await getAll('goals');
+  return goals.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+}
+
+async function updateGoal(goal) {
+  await put('goals', goal);
+  return goal;
+}
+
+async function adjustGoalSaved(goalId, delta) {
+  const goals = await getAll('goals');
+  const goal = goals.find((g) => g.id === goalId);
+  if (!goal) return null;
+  goal.savedAmount = Math.max(0, (goal.savedAmount || 0) + delta);
+  await put('goals', goal);
+  return goal;
+}
+
+async function deleteGoal(goalId) {
+  await remove('goals', goalId);
+}
+
 // ---- バックアップ / 復元 ----
 
 async function exportAllData() {
-  const [incomes, funds, expenses, categories, settings] = await Promise.all([
-    getAll('incomes'), getAll('funds'), getAll('expenses'), getAll('categories'), getAll('settings'),
+  const [incomes, funds, expenses, categories, settings, shifts, goals] = await Promise.all([
+    getAll('incomes'), getAll('funds'), getAll('expenses'), getAll('categories'), getAll('settings'), getAll('shifts'), getAll('goals'),
   ]);
-  return { version: DB_VERSION, exportedAt: new Date().toISOString(), incomes, funds, expenses, categories, settings };
+  return { version: DB_VERSION, exportedAt: new Date().toISOString(), incomes, funds, expenses, categories, settings, shifts, goals };
 }
 
 async function importAllData(data) {
@@ -308,6 +493,8 @@ async function importAllData(data) {
   if (data.expenses) await bulkPut('expenses', data.expenses);
   if (data.categories) await bulkPut('categories', data.categories);
   if (data.settings) await bulkPut('settings', data.settings);
+  if (data.shifts) await bulkPut('shifts', data.shifts);
+  if (data.goals) await bulkPut('goals', data.goals);
 }
 
 async function exportExpensesCSV() {
@@ -327,7 +514,7 @@ function csvEscape(v) {
 }
 
 function typeLabel(type) {
-  return { free: '自由資金', savings: '普通貯金', car: '車維持費' }[type] || type;
+  return frameName(type);
 }
 
 export const DB = {
@@ -340,6 +527,11 @@ export const DB = {
   getSettings,
   saveSetting,
   ensureDefaultsSeeded,
+  addFrame,
+  updateFrames,
+  deleteFrame,
+  frameName,
+  frameAllocOf,
   addIncome,
   deleteIncome,
   allocateFunds,
@@ -350,6 +542,16 @@ export const DB = {
   getMonthSummary,
   getAllMonths,
   getCategoryTotals,
+  addShift,
+  deleteShift,
+  getShiftsByMonth,
+  getMonthShiftSummary,
+  calcShift,
+  addGoal,
+  getGoals,
+  updateGoal,
+  adjustGoalSaved,
+  deleteGoal,
   exportAllData,
   importAllData,
   exportExpensesCSV,
