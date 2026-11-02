@@ -486,3 +486,18 @@ html[data-theme="mono"] { --accent: #5F6871; --accent-soft: rgba(95,104,113,0.14
   padding: 10px 12px;
   font-size: 13px;
 }
+
+/* ---- v5: 横はみ出し修正（設定の枠追加フォーム等が画面幅を超えて全体がずれる問題） ---- */
+
+html, body { overflow-x: clip; }
+input, select, textarea { max-width: 100%; }
+.field { min-width: 0; }
+.field input, .field select { min-width: 0; width: 100%; }
+.inline-form { min-width: 0; }
+.inline-form input { min-width: 0; font-size: 16px; }
+.inline-form .btn, .frame-row .btn { white-space: nowrap; }
+.suggest-text { min-width: 0; }
+.cal-day { min-width: 0; }
+.pattern-item span { min-width: 0; overflow-wrap: anywhere; }
+.stat-value { overflow-wrap: break-word; }
+.tx-sub, .goal-meta span { overflow-wrap: anywhere; }

@@ -1,6 +1,6 @@
 // service-worker.js — オフラインでも基本機能が使えるようにするキャッシュ戦略
 // バージョンを上げると古いキャッシュが破棄され、新しいファイルに更新される。
-const CACHE_VERSION = 'kakeibo-v4';
+const CACHE_VERSION = 'kakeibo-v5';
 
 const APP_SHELL = [
   './',
