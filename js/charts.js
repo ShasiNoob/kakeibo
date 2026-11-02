@@ -5,6 +5,38 @@ function formatYen(n) {
   return '¥' + Math.round(n).toLocaleString('ja-JP');
 }
 
+function formatYenShort(n) {
+  if (Math.abs(n) >= 10000) {
+    const v = n / 10000;
+    return '¥' + (Number.isInteger(v) ? v : v.toFixed(1)) + '万';
+  }
+  return formatYen(n);
+}
+
+// ライト/ダーク両対応の文字色(従来はダーク前提の色でライトモードだと読めなかった)
+function schemeText(strong) {
+  const dark = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return dark
+    ? (strong ? 'rgba(236,235,230,0.92)' : 'rgba(230,230,235,0.55)')
+    : (strong ? 'rgba(26,31,43,0.88)' : 'rgba(26,31,43,0.5)');
+}
+
+function drawGridlines(ctx, pad, chartW, chartH, max) {
+  ctx.strokeStyle = 'rgba(128,128,128,0.18)';
+  ctx.lineWidth = 1;
+  ctx.fillStyle = schemeText(false);
+  ctx.font = '10px -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  [0, 0.5, 1].forEach((r) => {
+    const y = pad.top + chartH - chartH * r;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + chartW, y);
+    ctx.stroke();
+    if (r > 0) ctx.fillText(formatYenShort(max * r), pad.left + 2, y - 3);
+  });
+}
+
 function setupCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -23,13 +55,15 @@ function setupCanvas(canvas) {
 function drawBarChart(canvas, labels, values, opts = {}) {
   const { ctx, w, h } = setupCanvas(canvas);
   ctx.clearRect(0, 0, w, h);
-  const pad = { top: 16, right: 12, bottom: 28, left: 12 };
+  const pad = { top: 30, right: 12, bottom: 28, left: 12 };
   const chartW = w - pad.left - pad.right;
   const chartH = h - pad.top - pad.bottom;
   const max = Math.max(...values, 1);
   const barGap = 8;
   const barW = Math.max(6, (chartW - barGap * (values.length - 1)) / values.length);
   const color = opts.color || '#D4A15C';
+
+  drawGridlines(ctx, pad, chartW, chartH, max);
 
   values.forEach((v, i) => {
     const barH = (v / max) * chartH;
@@ -40,7 +74,14 @@ function drawBarChart(canvas, labels, values, opts = {}) {
     roundRect(ctx, x, y, barW, Math.max(barH, 1), r);
     ctx.fill();
 
-    ctx.fillStyle = opts.labelColor || 'rgba(230,230,235,0.55)';
+    if (v > 0) {
+      ctx.fillStyle = schemeText(true);
+      ctx.font = 'bold 10px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(formatYenShort(v), x + barW / 2, y - 5);
+    }
+
+    ctx.fillStyle = opts.labelColor || schemeText(false);
     ctx.font = '10px -apple-system, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(labels[i], x + barW / 2, h - 10);
@@ -50,7 +91,7 @@ function drawBarChart(canvas, labels, values, opts = {}) {
 function drawLineChart(canvas, labels, values, opts = {}) {
   const { ctx, w, h } = setupCanvas(canvas);
   ctx.clearRect(0, 0, w, h);
-  const pad = { top: 16, right: 12, bottom: 28, left: 12 };
+  const pad = { top: 30, right: 12, bottom: 28, left: 12 };
   const chartW = w - pad.left - pad.right;
   const chartH = h - pad.top - pad.bottom;
   const max = Math.max(...values, 1);
@@ -58,6 +99,21 @@ function drawLineChart(canvas, labels, values, opts = {}) {
   const range = max - min || 1;
   const color = opts.color || '#6FAE9C';
   const stepX = values.length > 1 ? chartW / (values.length - 1) : 0;
+
+  ctx.strokeStyle = 'rgba(128,128,128,0.18)';
+  ctx.lineWidth = 1;
+  ctx.fillStyle = schemeText(false);
+  ctx.font = '10px -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  [0, 0.5, 1].forEach((r) => {
+    const val = min + range * r;
+    const y = pad.top + chartH - chartH * r;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + chartW, y);
+    ctx.stroke();
+    ctx.fillText(formatYenShort(val), pad.left + 2, y - 3);
+  });
 
   const pts = values.map((v, i) => ({
     x: pad.left + i * stepX,
@@ -89,7 +145,15 @@ function drawLineChart(canvas, labels, values, opts = {}) {
     ctx.fill();
   });
 
-  ctx.fillStyle = opts.labelColor || 'rgba(230,230,235,0.55)';
+  if (pts.length) {
+    const last = pts[pts.length - 1];
+    ctx.fillStyle = schemeText(true);
+    ctx.font = 'bold 11px -apple-system, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(formatYen(values[values.length - 1]), Math.min(last.x, w - 12), Math.max(last.y - 8, 11));
+  }
+
+  ctx.fillStyle = opts.labelColor || schemeText(false);
   ctx.font = '10px -apple-system, sans-serif';
   ctx.textAlign = 'center';
   labels.forEach((l, i) => {
@@ -111,7 +175,7 @@ function drawHBarBreakdown(canvas, entries, opts = {}) {
     ctx.fillStyle = e.color || '#D4A15C';
     roundRect(ctx, w * 0.36, y + 4, Math.max(barW, 2), rowH - 10, 4);
     ctx.fill();
-    ctx.fillStyle = 'rgba(230,230,235,0.85)';
+    ctx.fillStyle = opts.textColor || schemeText(true);
     ctx.font = '11px -apple-system, sans-serif';
     ctx.textAlign = 'left';
     ctx.fillText(e.label, 2, y + rowH / 2 + 4);

@@ -255,7 +255,25 @@ function renderTxRow(it) {
 // ---------------- グラフ ----------------
 
 async function renderCharts() {
+  const month = thisMonth();
+  const summary = await DB.getMonthSummary(month);
+  const diff = summary.incomeTotal - summary.expenseTotal;
   return `
+    <section class="section">
+      <div class="section-head"><h2>今月の収支（${monthLabel(month)}）</h2></div>
+      <div class="stat-grid stat-grid-3">
+        ${statTile('収入', summary.incomeTotal, 'up')}
+        ${statTile('支出', summary.expenseTotal, 'down')}
+        <div class="stat-tile ${diff >= 0 ? 'stat-up' : 'stat-down'}">
+          <div class="stat-label">差額</div>
+          <div class="stat-value stat-value-sm">${diff >= 0 ? '+' : '−'}${yen(Math.abs(diff))}</div>
+        </div>
+      </div>
+    </section>
+    <section class="section">
+      <div class="section-head"><h2>資金の内訳</h2></div>
+      <div class="chart-card"><canvas id="chart-funds" height="80"></canvas></div>
+    </section>
     <section class="section">
       <div class="section-head"><h2>月別収入</h2></div>
       <div class="chart-card"><canvas id="chart-income" height="220"></canvas></div>
@@ -278,6 +296,26 @@ async function renderCharts() {
 }
 
 async function runPostRenderCharts() {
+  const fundsCanvas = document.getElementById('chart-funds');
+  if (fundsCanvas) {
+    const settings = await DB.getSettings();
+    const totals = await DB.getFundTotals();
+    const entries = [
+      { label: '自由資金', value: totals.free || 0, color: palette(1) },
+      ...settings.frames.map((fr, i) => ({ label: fr.name, value: totals[fr.id] || 0, color: palette(i + 2) })),
+    ].filter((e) => e.value > 0);
+    if (entries.length === 0) {
+      const ctx = fundsCanvas.getContext('2d');
+      ctx.fillStyle = 'rgba(128,128,128,0.6)';
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('残高がありません', fundsCanvas.parentElement.clientWidth / 2, 40);
+    } else {
+      fundsCanvas.height = Math.max(entries.length * 30 + 10, 80);
+      Charts.drawHBarBreakdown(fundsCanvas, entries);
+    }
+  }
+
   const incomeCanvas = document.getElementById('chart-income');
   const expenseCanvas = document.getElementById('chart-expense');
   const assetsCanvas = document.getElementById('chart-assets');
@@ -353,6 +391,9 @@ async function renderFunds() {
       ${statTile('自由資金', totals.free || 0)}
       ${settings.frames.map((fr) => statTile(escapeHtml(fr.name), totals[fr.id] || 0)).join('')}
       ${orphanTypes.map((t) => statTile(escapeHtml(DB.frameName(t)), totals[t])).join('')}
+    </section>
+    <section class="section">
+      <button class="btn btn-outline btn-block" data-open-modal="transfer">⇄ 資金を移動する（枠のあいだ）</button>
     </section>
     ${fundSection('自由資金の内訳（出身月別）', free)}
     ${settings.frames.map((fr) => fundSection(`${escapeHtml(fr.name)}の内訳（積立月別）`, frameFunds[fr.id])).join('')}
@@ -482,6 +523,8 @@ function goalCard(g) {
   const done = g.targetAmount > 0 && (g.savedAmount || 0) >= g.targetAmount;
   const remain = Math.max(0, g.targetAmount - (g.savedAmount || 0));
   return `<div class="goal-card" data-goal-id="${g.id}">
+    ${g.image ? `<img class="goal-img" src="${g.image}" alt="">` : ''}
+    <div class="goal-body">
     <div class="goal-head">
       <div class="goal-name">${escapeHtml(g.name)}${done ? ' <span class="goal-done">達成！</span>' : ''}</div>
       <div class="goal-pct">${pct}%</div>
@@ -492,6 +535,7 @@ function goalCard(g) {
     <div class="goal-meta">
       <span>${yen(g.savedAmount || 0)} <span class="fund-orig">/ ${yen(g.targetAmount)}</span></span>
       <span>${done ? 'おめでとうございます' : 'あと ' + yen(remain)}${g.deadline ? ' ・ 目標日 ' + escapeHtml(g.deadline) : ''}</span>
+    </div>
     </div>
   </div>`;
 }
@@ -594,6 +638,7 @@ async function renderModal() {
   else if (type === 'monthDetail') body = await renderMonthDetail(payload);
   else if (type === 'categoryChart') body = renderCategoryChartModal(payload);
   else if (type === 'shiftDay') body = await renderShiftDayModal(payload);
+  else if (type === 'transfer') body = await renderTransferModal();
   else if (type === 'goalNew') body = renderGoalNewModal();
   else if (type === 'goalDetail') body = await renderGoalDetailModal(payload);
   else if (type === 'confirmDeleteFrame') body = await renderConfirmDeleteFrame(payload);
@@ -609,6 +654,7 @@ async function renderModal() {
 async function renderIncomeForm() {
   const settings = await DB.getSettings();
   const now = new Date();
+  const shiftSummary = await DB.getMonthShiftSummary(thisMonth());
   const frameFields = settings.frames.map((fr) => `
     <label class="field"><span>${escapeHtml(fr.name)}</span><input type="number" class="frame-amt" name="frame_${fr.id}" value="${fr.defaultAmount}" inputmode="numeric"></label>`).join('');
   return `
@@ -621,6 +667,11 @@ async function renderIncomeForm() {
         <label class="field"><span>年</span><input type="number" name="year" value="${now.getFullYear()}" required></label>
         <label class="field"><span>月</span><input type="number" name="month" min="1" max="12" value="${now.getMonth() + 1}" required></label>
       </div>
+      ${shiftSummary.totalPay > 0 ? `
+      <div class="suggest-box">
+        <div class="suggest-text">今月のシフト給与見込みは <strong>${yen(shiftSummary.totalPay)}</strong> です。そのまま入力しますか？</div>
+        <button type="button" class="btn btn-outline btn-sm" id="use-shift-pay" data-amount="${shiftSummary.totalPay}">この金額で入力する</button>
+      </div>` : ''}
       <label class="field"><span>金額</span><input type="number" name="amount" inputmode="numeric" placeholder="49500" required></label>
       <div class="section-head" style="margin-top:4px;"><h3>貯金枠への積立</h3></div>
       <div class="frame-fields">${frameFields || '<div class="hint">貯金枠がありません（設定タブで追加できます）</div>'}</div>
@@ -759,6 +810,30 @@ async function renderShiftDayModal(dateStr) {
   `;
 }
 
+async function renderTransferModal() {
+  const settings = await DB.getSettings();
+  const totals = await DB.getFundTotals();
+  const types = [
+    { id: 'free', name: '自由資金' },
+    ...settings.frames.map((fr) => ({ id: fr.id, name: fr.name })),
+  ];
+  const options = (selectedId) => types.map((t) => `
+    <option value="${t.id}" ${t.id === selectedId ? 'selected' : ''}>${escapeHtml(t.name)}（残高 ${yen(totals[t.id] || 0)}）</option>`).join('');
+  return `
+    <div class="modal-head">
+      <h2>資金を移動する</h2>
+      <button class="icon-btn" data-close-modal="1">✕</button>
+    </div>
+    <form id="transfer-form" class="modal-form">
+      <label class="field"><span>移動元</span><select name="from">${options('free')}</select></label>
+      <label class="field"><span>移動先</span><select name="to">${options(settings.frames[0]?.id || 'free')}</select></label>
+      <label class="field"><span>金額</span><input type="number" name="amount" inputmode="numeric" placeholder="5000" required></label>
+      <div class="hint">移動元の古い積立から順に移します。移動先では同じ出身月の内訳として残ります。</div>
+      <button type="submit" class="btn btn-primary btn-block">移動する</button>
+    </form>
+  `;
+}
+
 function renderGoalNewModal() {
   return `
     <div class="modal-head">
@@ -769,6 +844,7 @@ function renderGoalNewModal() {
       <label class="field"><span>買いたいもの</span><input type="text" name="name" placeholder="例：DDJ-1000" required></label>
       <label class="field"><span>目標金額</span><input type="number" name="targetAmount" inputmode="numeric" placeholder="150000" required></label>
       <label class="field"><span>目標日（任意）</span><input type="date" name="deadline"></label>
+      <label class="field"><span>画像（任意）</span><input type="file" name="image" accept="image/*"></label>
       <button type="submit" class="btn btn-primary btn-block">追加する</button>
     </form>
   `;
@@ -784,6 +860,7 @@ async function renderGoalDetailModal(goalId) {
       <h2>${escapeHtml(g.name)}</h2>
       <button class="icon-btn" data-close-modal="1">✕</button>
     </div>
+    ${g.image ? `<img class="goal-detail-img" src="${g.image}" alt="">` : ''}
     <div class="detail-amount" style="color:var(--accent);">${yen(g.savedAmount || 0)}</div>
     <div class="detail-meta">目標 ${yen(g.targetAmount)} ・ ${pct}% ・ あと ${yen(Math.max(0, g.targetAmount - (g.savedAmount || 0)))}${g.deadline ? ' ・ 目標日 ' + escapeHtml(g.deadline) : ''}</div>
     <div class="fund-bar-wrap" style="margin-top:12px;">
@@ -805,6 +882,8 @@ async function renderGoalDetailModal(goalId) {
         <label class="field"><span>目標金額</span><input type="number" name="targetAmount" value="${g.targetAmount}" inputmode="numeric" required></label>
         <label class="field"><span>目標日（任意）</span><input type="date" name="deadline" value="${escapeHtml(g.deadline || '')}"></label>
       </div>
+      <label class="field"><span>画像を変更（任意）</span><input type="file" name="image" accept="image/*"></label>
+      ${g.image ? `<label class="check-row"><input type="checkbox" name="removeImage" value="1"> 画像を削除する</label>` : ''}
       <button type="submit" class="btn btn-outline btn-block">編集を保存</button>
     </form>
     <button class="btn btn-danger btn-block" style="margin-top:16px;" data-delete-goal="${g.id}">この目標を削除</button>
@@ -931,7 +1010,8 @@ function attachHandlers() {
     goalForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(goalForm);
-      await DB.addGoal({ name: fd.get('name'), targetAmount: Number(fd.get('targetAmount')), deadline: fd.get('deadline') });
+      const image = await readImageFile(goalForm.querySelector('[name="image"]'));
+      await DB.addGoal({ name: fd.get('name'), targetAmount: Number(fd.get('targetAmount')), deadline: fd.get('deadline'), image });
       showToast('目標を追加しました');
       closeModal();
       render();
@@ -961,6 +1041,9 @@ function attachHandlers() {
       g.name = fd.get('name');
       g.targetAmount = Number(fd.get('targetAmount'));
       g.deadline = fd.get('deadline') || '';
+      const image = await readImageFile(goalEditForm.querySelector('[name="image"]'));
+      if (image) g.image = image;
+      else if (fd.get('removeImage')) g.image = '';
       await DB.updateGoal(g);
       showToast('目標を更新しました');
       openModal('goalDetail', g.id);
@@ -975,6 +1058,23 @@ function attachHandlers() {
     });
   });
 
+  // ---- 資金移動 ----
+  const transferForm = document.getElementById('transfer-form');
+  if (transferForm) {
+    transferForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(transferForm);
+      try {
+        await DB.transferFunds(fd.get('from'), fd.get('to'), Number(fd.get('amount')));
+        showToast('資金を移動しました');
+        state.modal = null;
+        render();
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+  }
+
   // ---- 収入 ----
   const incomeForm = document.getElementById('income-form');
   if (incomeForm) {
@@ -987,6 +1087,15 @@ function attachHandlers() {
     };
     incomeForm.addEventListener('input', preview);
     preview();
+    const useShiftPayBtn = document.getElementById('use-shift-pay');
+    if (useShiftPayBtn) {
+      useShiftPayBtn.addEventListener('click', () => {
+        const amountInput = incomeForm.querySelector('[name="amount"]');
+        amountInput.value = useShiftPayBtn.dataset.amount;
+        useShiftPayBtn.textContent = '入力しました ✓';
+        preview();
+      });
+    }
     incomeForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(incomeForm);
@@ -1203,6 +1312,56 @@ function attachHandlers() {
       setTab('home');
     });
   }
+}
+
+// 画像ファイル → dataURL。まず長辺720pxに縮小して保存容量を抑え、
+// うまくいかない環境では元のまま読み込む。
+function readImageFile(input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return Promise.resolve(null);
+  return compressImageFile(file).catch(() => readAsDataURL(file));
+}
+
+function readAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function compressImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    const timer = setTimeout(() => {
+      URL.revokeObjectURL(url);
+      reject(new Error('image load timeout'));
+    }, 4000);
+    img.onload = () => {
+      clearTimeout(timer);
+      try {
+        const maxDim = 720;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      } catch (err) {
+        URL.revokeObjectURL(url);
+        reject(err);
+      }
+    };
+    img.onerror = () => {
+      clearTimeout(timer);
+      URL.revokeObjectURL(url);
+      reject(new Error('image load failed'));
+    };
+    img.src = url;
+  });
 }
 
 function downloadFile(filename, content, mime) {

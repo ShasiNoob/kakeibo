@@ -173,6 +173,39 @@ async function updateFrames(frames) {
   await saveSetting('frames', frames);
 }
 
+// 枠間(自由資金含む)の資金移動。移動元の lot を FIFO で減らし、
+// 移動先に同じ出身月の lot を作ることで内訳表示と整合性を保つ。
+async function transferFunds(fromType, toType, amount) {
+  amount = Number(amount) || 0;
+  if (amount <= 0) throw new Error('金額を入力してください');
+  if (fromType === toType) throw new Error('移動元と移動先が同じです');
+  const all = await getAll('funds');
+  const pool = all
+    .filter((f) => f.type === fromType && f.remainingAmount > 0)
+    .sort((a, b) => (a.sourceMonth < b.sourceMonth ? -1 : a.sourceMonth > b.sourceMonth ? 1 : 0));
+  const total = pool.reduce((s, f) => s + f.remainingAmount, 0);
+  if (total < amount) throw new Error('移動元の残高が不足しています');
+  let remaining = amount;
+  const changed = [];
+  for (const fund of pool) {
+    if (remaining <= 0) break;
+    const move = Math.min(fund.remainingAmount, remaining);
+    fund.remainingAmount -= move;
+    remaining -= move;
+    changed.push(fund);
+    changed.push({
+      id: uid(),
+      type: toType,
+      sourceMonth: fund.sourceMonth,
+      originalAmount: move,
+      remainingAmount: move,
+      incomeId: fund.incomeId,
+      transferredFrom: fromType,
+    });
+  }
+  await bulkPut('funds', changed);
+}
+
 async function deleteFrame(frameId) {
   const funds = (await getAll('funds')).filter((f) => f.type === frameId);
   const remaining = funds.reduce((s, f) => s + f.remainingAmount, 0);
@@ -441,13 +474,14 @@ async function getMonthShiftSummary(monthStr) {
 
 // ---- 目標 ----
 
-async function addGoal({ name, targetAmount, deadline }) {
+async function addGoal({ name, targetAmount, deadline, image }) {
   const goal = {
     id: uid(),
     name,
     targetAmount: Number(targetAmount) || 0,
     savedAmount: 0,
     deadline: deadline || '',
+    image: image || '',
     createdAt: new Date().toISOString().slice(0, 10),
   };
   await put('goals', goal);
@@ -530,6 +564,7 @@ export const DB = {
   addFrame,
   updateFrames,
   deleteFrame,
+  transferFunds,
   frameName,
   frameAllocOf,
   addIncome,
