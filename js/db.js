@@ -550,6 +550,81 @@ async function exportExpensesCSV() {
   return rows.map((r) => r.map(csvEscape).join(',')).join('\n');
 }
 
+// ---- カレンダー書き出し (iCalendar / .ics) ----
+// Googleカレンダー・iPhoneカレンダー等にインポートできる形式でシフトを書き出す。
+
+function icsEscape(s) {
+  return String(s ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+    .replace(/\r?\n/g, '\\n');
+}
+
+function icsDateTime(dateStr, timeStr) {
+  return dateStr.replace(/-/g, '') + 'T' + String(timeStr).replace(':', '') + '00';
+}
+
+function addDaysISO(dateStr, days) {
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function buildShiftsICS(shifts, stamp) {
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//kakeibo//shifts//JA',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'X-WR-CALNAME:バイトシフト',
+    'BEGIN:VTIMEZONE',
+    'TZID:Asia/Tokyo',
+    'BEGIN:STANDARD',
+    'DTSTART:19700101T000000',
+    'TZOFFSETFROM:+0900',
+    'TZOFFSETTO:+0900',
+    'TZNAME:JST',
+    'END:STANDARD',
+    'END:VTIMEZONE',
+  ];
+  shifts.forEach((s) => {
+    // 終了が出勤以前なら翌日終わりのシフトとして扱う
+    const endDate = timeToMinutes(s.end) <= timeToMinutes(s.start) ? addDaysISO(s.date, 1) : s.date;
+    const mins = s.minutes || 0;
+    const dur = `勤務時間 ${Math.floor(mins / 60)}時間${mins % 60 ? `${mins % 60}分` : ''}`;
+    const desc = [
+      dur,
+      s.breakMin ? `休憩 ${s.breakMin}分` : null,
+      `時給 ¥${(s.wage || 0).toLocaleString()}`,
+      `給与見込み ¥${(s.pay || 0).toLocaleString()}`,
+    ].filter(Boolean).join('\n');
+    lines.push(
+      'BEGIN:VEVENT',
+      `UID:${s.id}@kakeibo`,
+      `DTSTAMP:${stamp}`,
+      `DTSTART;TZID=Asia/Tokyo:${icsDateTime(s.date, s.start)}`,
+      `DTEND;TZID=Asia/Tokyo:${icsDateTime(endDate, s.end)}`,
+      `SUMMARY:${icsEscape('バイト')}`,
+      `DESCRIPTION:${icsEscape(desc)}`,
+      'END:VEVENT'
+    );
+  });
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n') + '\r\n';
+}
+
+async function exportShiftsICS(monthStr) {
+  let shifts = (await getAll('shifts')).slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.start < b.start ? -1 : 1));
+  if (monthStr) shifts = shifts.filter((s) => (s.month || s.date.slice(0, 7)) === monthStr);
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+  return buildShiftsICS(shifts, stamp);
+}
+
 function csvEscape(v) {
   const s = String(v ?? '');
   if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
@@ -599,5 +674,6 @@ export const DB = {
   exportAllData,
   importAllData,
   exportExpensesCSV,
+  exportShiftsICS,
   typeLabel,
 };

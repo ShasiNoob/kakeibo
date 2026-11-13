@@ -539,6 +539,13 @@ async function renderShifts() {
           </div>`).join('')}
         </div>`}
     </section>
+
+    <section class="section">
+      <div class="form-card">
+        <button class="btn btn-outline btn-block" id="export-ics-month">この月のシフトをカレンダーに書き出す（.ics）</button>
+        <div class="hint">GoogleカレンダーやiPhoneのカレンダーにインポートすると、シフトを予定として表示できます。</div>
+      </div>
+    </section>
   `;
 }
 
@@ -699,6 +706,7 @@ async function renderSettings() {
           <input type="file" id="import-json" accept="application/json" hidden>
         </label>
         <button class="btn btn-outline btn-block" id="export-csv">CSV出力（支出）</button>
+        <button class="btn btn-outline btn-block" id="export-ics-all">全シフトをカレンダーに書き出す（.ics）</button>
       </div>
     </section>
 
@@ -1437,6 +1445,23 @@ function attachHandlers() {
       await DB.getSettings();
       const csv = await DB.exportExpensesCSV();
       downloadFile(`kakeibo_expenses_${todayISO()}.csv`, '﻿' + csv, 'text/csv');
+    });
+  }
+  const exportIcsMonthBtn = document.getElementById('export-ics-month');
+  if (exportIcsMonthBtn) {
+    exportIcsMonthBtn.addEventListener('click', async () => {
+      const month = state.shiftMonth || thisMonth();
+      const ics = await DB.exportShiftsICS(month);
+      downloadFile(`kakeibo_shifts_${month}.ics`, ics, 'text/calendar');
+      showToast('シフトを書き出しました');
+    });
+  }
+  const exportIcsAllBtn = document.getElementById('export-ics-all');
+  if (exportIcsAllBtn) {
+    exportIcsAllBtn.addEventListener('click', async () => {
+      const ics = await DB.exportShiftsICS();
+      downloadFile(`kakeibo_shifts_all_${todayISO()}.ics`, ics, 'text/calendar');
+      showToast('シフトを書き出しました');
     });
   }
 
